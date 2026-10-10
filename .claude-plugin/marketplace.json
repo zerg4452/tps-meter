@@ -1,0 +1,5 @@
+{
+  "name": "kims-mods",
+  "owner": { "name": "kims" },
+  "plugins": [{ "name": "tps-meter", "source": "./" }]
+}
