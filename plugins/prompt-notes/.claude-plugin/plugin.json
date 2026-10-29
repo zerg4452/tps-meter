@@ -1,0 +1,7 @@
+{
+  "name": "prompt-notes",
+  "version": "0.1.0",
+  "description": "Sticky notes for prompts in a side pane: write several, fold each open or closed, and put one into the prompt box.",
+  "author": { "name": "kims" },
+  "types": "./types/index.d.ts"
+}

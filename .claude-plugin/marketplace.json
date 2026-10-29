@@ -3,6 +3,7 @@
   "owner": { "name": "kims" },
   "plugins": [
     { "name": "tps-meter", "source": "./" },
-    { "name": "subagent-panel", "source": "./plugins/subagent-panel" }
+    { "name": "subagent-panel", "source": "./plugins/subagent-panel" },
+    { "name": "prompt-notes", "source": "./plugins/prompt-notes" }
   ]
 }

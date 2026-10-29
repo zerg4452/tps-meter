@@ -6,6 +6,7 @@ Claude Code mods, published as one marketplace (`kims-mods`). Install only the o
 |---|---|
 | `tps-meter` | Live generation speed and total elapsed time in the status line |
 | `subagent-panel` | Subagent and Codex runs (model, effort, usage, edited files) and Codex availability in a side pane |
+| `prompt-notes` | Sticky notes for prompts in a side pane, put into the prompt box with one click |
 
 ## tps-meter
 
@@ -48,6 +49,32 @@ A band above the prompt shows a summary, including the desktop app's task list p
 
 `/agents-panel` does the same as the button.
 
+## prompt-notes
+
+Opens a pane (`프롬프트 메모`) for prompts you want to keep at hand.
+
+```
+                                      [ + 새 메모 ]
+▾ /ez-task 로그인 화면 버그 고쳐줘
+  최종 수정일 : 2026-10-29 18:05:08
+  ┌──────────────────────────────────┐
+  │ /ez-task 로그인 화면 버그 고쳐줘 │
+  └──────────────────────────────────┘
+                           [ 넣기 ] [ 삭제 ]
+
+▸ 적대적 리뷰 돌려줘
+  최종 수정일 : 2026-10-29 16:10:33
+```
+
+- Add as many notes as you need (up to 30). Each folds open or closed; its first line is the title.
+- Text is saved as you type, and kept across sessions on this machine. A session that is already open picks up changes from another session when you reopen the pane.
+- 최종 수정일 is the last time the note's text changed. It updates when you press Enter or another button, not on every keystroke, so the cursor stays where you type.
+- `넣기` replaces the prompt box's text with the note. You send it yourself.
+- `삭제` asks once more (`삭제 확인`) before it deletes.
+- A slash command runs only when it is at the very start of the message, so begin the note with it (`/ez-task ...`).
+
+`/notes` opens or closes the pane.
+
 ## Install
 
 Requires the `claude` CLI. Add the marketplace once:
@@ -56,7 +83,7 @@ Requires the `claude` CLI. Add the marketplace once:
 claude plugin marketplace add zerg4452/tps-meter
 ```
 
-Then install either mod, or both:
+Then install the ones you want:
 
 ```bash
 claude plugin install tps-meter@kims-mods --scope user
@@ -64,6 +91,10 @@ claude plugin install tps-meter@kims-mods --scope user
 
 ```bash
 claude plugin install subagent-panel@kims-mods --scope user
+```
+
+```bash
+claude plugin install prompt-notes@kims-mods --scope user
 ```
 
 They then load in every new session, including local sessions in the desktop app's Code tab.
@@ -82,6 +113,10 @@ claude plugin update tps-meter
 claude plugin update subagent-panel
 ```
 
+```bash
+claude plugin update prompt-notes
+```
+
 Then run `/reload-plugins` in an open session, or start a new one.
 
 ## Uninstall
@@ -92,4 +127,8 @@ claude plugin uninstall tps-meter
 
 ```bash
 claude plugin uninstall subagent-panel
+```
+
+```bash
+claude plugin uninstall prompt-notes
 ```
