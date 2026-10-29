@@ -69,11 +69,10 @@ test('Codex 보안 검토 명령이 모델·추론 등급과 함께 기록된다
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await ui.find({ type: 'Text', text: /^\[완료\]/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /codex task/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /\[보안검토\]/ })).toBeDefined()
-  expect((await ui.find({ type: 'Text', text: /gpt-6-astra/ }))?.text).toMatch(
-    /^gpt-6-astra · 추론 high/,
+  // 끝난 실행은 위쪽 '실행 중'이 아니라 아래쪽 이력에 한 줄로 남는다.
+  expect(await ui.find({ type: 'Text', text: /^\[완료\]/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /codex task/ }))?.text).toMatch(
+    /^✓ codex task \[보안검토\] · gpt-6-astra · 추론 high/,
   )
   await ui.unmount()
 })
@@ -88,7 +87,8 @@ test('Codex가 아닌 Bash 명령은 기록하지 않는다', async ($, on) => {
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await ui.find({ type: 'Text', text: /아직 실행된 항목이 없습니다/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /실행 중인 서브에이전트·Codex가 없습니다/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /아직 기록된 작업이 없습니다/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -146,12 +146,11 @@ test('echo로 출력만 한 명령과 프롬프트 속 옵션은 실행 정보�
   })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  const rows = await ui.findAll({ type: 'Text', text: /^\[(완료|진행)\]/ })
+  const rows = await ui.findAll({ type: 'Text', text: /codex task/ })
 
   expect(rows).toHaveLength(1)
   expect(await ui.find({ type: 'Text', text: /pretend/ })).toBeUndefined()
-  expect((await ui.find({ type: 'Text', text: /^actual/ }))?.text).toMatch(/^actual · 추론 기본값/)
-  expect(await ui.find({ type: 'Text', text: /\[리뷰\]/ })).toBeDefined()
+  expect(rows[0]?.text).toMatch(/^✓ codex task \[리뷰\] · actual · 추론 기본값/)
   await ui.unmount()
 })
 
@@ -185,7 +184,7 @@ test('백그라운드 Codex는 자기 작업 id의 완료 알림으로만 끝난
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await ui.findAll({ type: 'Text', text: /^\[완료\]/ })).toHaveLength(1)
+  expect(await ui.findAll({ type: 'Text', text: /^✓ codex/ })).toHaveLength(1)
   expect(await ui.findAll({ type: 'Text', text: /^\[진행\]/ })).toHaveLength(1)
   await ui.unmount()
 })
@@ -213,7 +212,7 @@ test('항목 기록보다 먼저 온 완료 알림도 반영된다', async ($, o
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await ui.find({ type: 'Text', text: /^\[중단\]/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^✗ codex review/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -251,7 +250,7 @@ test('호출한 쪽 응답과 함께 끝나는 백그라운드 실행은 종료�
   })
 
   const after = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await after.find({ type: 'Text', text: /^\[종료\]/ })).toBeDefined()
+  expect(await after.find({ type: 'Text', text: /^– codex review/ })).toBeDefined()
   await after.unmount()
 })
 
@@ -422,5 +421,126 @@ test('리뷰 본문에 rate limit이 나와도 정상 실행이면 사용 가능
   expect((await ui.find({ type: 'Text', text: /사용 가능/ }))?.text).toBe(
     '사용 가능 (마지막 실행 정상)',
   )
+  await ui.unmount()
+})
+
+const prompted = (on: Parameters<Parameters<typeof test>[1]>[1]) => {
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  on('session.receive', (_, e) => ({ text: e.text }))
+}
+
+const complete = (reason: 'answer' | 'aborted', turnId: string) => ({
+  turnId,
+  answer: '',
+  durationMs: 1,
+  isAborted: reason === 'aborted',
+  reason,
+})
+
+test('프롬프트 하나가 작업 이력 하나가 되고 펼치면 단계·백그라운드 작업·결과가 보인다', async ($, on) => {
+  const clock = mock.clock(on)
+  prompted(on)
+  on('tool.call', (_, e) =>
+    e.tool === 'Bash'
+      ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'b7' } }
+      : { result: {} },
+  )
+
+  await $.prompt.submit({ text: '일단 푸시까지 해줘\n둘째 줄' })
+  await $.turn.start({ text: '일단 푸시까지 해줘', turnId: 't1' })
+  await $.tool.call({
+    tool: 'mcp__ccd_turn__update_plan',
+    items: [
+      { content: '저장소에 복사', status: 'in_progress' },
+      { content: '커밋·push', status: 'pending' },
+    ],
+  })
+  await $.tool.call({
+    tool: 'Bash',
+    command: 'npm run dev',
+    description: 'dev 서버 실행',
+    run_in_background: true,
+  })
+  await $.tool.call({ tool: 'mcp__ccd_turn__update_plan', advance: true })
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'main으로 push했습니다.' })
+  await clock.advance(75_000)
+  await $.turn.complete(complete('answer', 't1'))
+
+  // 완료 알림으로 이어진 턴은 새 작업이 아니라 같은 작업에 붙는다.
+  await $.session.receive({
+    origin: { kind: 'task-notification' },
+    text: '<task-id>b7</task-id><status>completed</status>',
+  })
+  await $.turn.start({ text: '', turnId: 't2' })
+  await $.turn.complete(complete('answer', 't2'))
+
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const header = await ui.findAll({ type: 'Button', text: /일단 푸시까지/ })
+
+    expect(header).toHaveLength(1)
+    expect(header[0]?.props.label).toMatch(/^▸ \d{2}:\d{2} {2}일단 푸시까지 해줘$/)
+    expect((await ui.find({ type: 'Text', text: /정상 종료/ }))?.text).toBe(
+      '  완료 2/2 · 정상 종료 · 1분 15초',
+    )
+    expect(await ui.find({ type: 'Text', text: /저장소에 복사/ })).toBeUndefined()
+
+    await ui.press({ key: header[0]?.key ?? '' })
+    expect((await ui.find({ type: 'Text', text: /저장소에 복사/ }))?.text).toBe('✓ 저장소에 복사')
+    expect((await ui.find({ type: 'Text', text: /커밋·push/ }))?.text).toBe('✓ 커밋·push')
+    expect((await ui.find({ type: 'Text', text: /dev 서버/ }))?.text).toMatch(
+      /^✓ dev 서버 실행 · 완료/,
+    )
+    expect((await ui.find({ type: 'Text', text: /^결과/ }))?.text).toBe(
+      '결과: main으로 push했습니다.',
+    )
+    await ui.press({ key: header[0]?.key ?? '' })
+    await ui.unmount()
+  }
+})
+
+test('중단된 작업은 중단됨과 남은 단계의 미완료, 실패한 도구 수를 보인다', async ($, on) => {
+  mock.clock(on)
+  prompted(on)
+  on('tool.call', (_, e) =>
+    e.tool === 'Read' ? { result: undefined, isError: true, text: '없음' } : { result: {} },
+  )
+
+  await $.prompt.submit({ text: '첫 작업' })
+  await $.turn.start({ text: '첫 작업', turnId: 't1' })
+  await $.turn.complete(complete('answer', 't1'))
+
+  await $.prompt.submit({ text: '두 번째 작업' })
+  await $.turn.start({ text: '두 번째 작업', turnId: 't2' })
+  await $.tool.call({
+    tool: 'mcp__ccd_turn__update_plan',
+    items: [
+      { content: '조사', status: 'completed' },
+      { content: '구현', status: 'in_progress' },
+    ],
+  })
+  await $.tool.call({ tool: 'Read', file_path: '/x' })
+  await $.turn.complete(complete('aborted', 't2'))
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const headers = await ui.findAll({ type: 'Button', text: /작업$/ })
+
+  // 최근 작업이 위에 온다.
+  expect(headers.map(header => (header.props.label as string).replace(/^▸ \d{2}:\d{2} {2}/, ''))).toEqual([
+    '두 번째 작업',
+    '첫 작업',
+  ])
+  expect((await ui.find({ type: 'Text', text: /중단됨/ }))?.text).toBe(
+    '  완료 1/2 · 중단됨 · 0초 · 도구 오류·거부 1회',
+  )
+  expect((await ui.find({ type: 'Text', text: /단계 없음/ }))?.text).toBe('  단계 없음 · 정상 종료 · 0초')
+
+  await ui.press({ key: headers[0]?.key ?? '' })
+  expect((await ui.find({ type: 'Text', text: /구현/ }))?.text).toBe('▶ 구현 (미완료)')
+
+  await ui.press({ key: 'clear' })
+  expect(await ui.find({ type: 'Text', text: /아직 기록된 작업이 없습니다/ })).toBeDefined()
   await ui.unmount()
 })

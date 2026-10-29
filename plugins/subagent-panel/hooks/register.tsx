@@ -2,16 +2,22 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type {
+  BgTask,
   CodexHealth,
+  Job,
+  JobStatus,
   PlanStep,
   Run,
   RunStats,
   RunStatus,
+  StepStatus,
 } from '../types'
 
 const PANE = 'subagent-panel'
 const TITLE = '에이전트 현황'
-const KEEP = 30
+// 작업 이력에서 지난 실행을 보여 주므로 넉넉히 남긴다.
+const KEEP = 60
+const JOB_KEEP = 20
 const MAIN = 'main'
 const PLAN_TOOL = 'mcp__ccd_turn__update_plan'
 const WRAP_TOOL = 'mcp__ccd_turn__wrap_up'
@@ -30,10 +36,17 @@ const isPaneOpen = atom(
 const codex = atom({ plugin: 'subagent-panel', key: 'codex' } as const, null, {
   shape: 'codex-1',
 })
-// 수정 파일 목록을 펼친 실행 id
+// 펼친 항목 id: 수정 파일 목록은 실행 id, 작업 이력은 `job:<id>`
 const expanded = atom({ plugin: 'subagent-panel', key: 'expanded' } as const, [], {
   shape: 'expanded-1',
 })
+const jobs = atom({ plugin: 'subagent-panel', key: 'jobs' } as const, [], {
+  shape: 'jobs-1',
+})
+const currentJob = atom(
+  { plugin: 'subagent-panel', key: 'currentJob' } as const,
+  null,
+)
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 // Codex 출력에서 사용 한도를 알리는 문구. 리뷰 본문에 같은 단어가 나와도 오탐하지 않도록
@@ -75,7 +88,33 @@ const RUN_COLOR: Record<RunStatus, string> = {
   ended: 'subtle',
 }
 
+const JOB_LABEL: Record<JobStatus, string> = {
+  running: '진행 중',
+  done: '정상 종료',
+  aborted: '중단됨',
+  error: '오류',
+}
+const JOB_COLOR: Record<JobStatus, string> = {
+  running: 'warning',
+  done: 'success',
+  aborted: 'warning',
+  error: 'error',
+}
+const STEP_MARK: Record<StepStatus, string> = {
+  completed: '✓',
+  in_progress: '▶',
+  pending: '·',
+}
+const RUN_MARK: Record<RunStatus, string> = {
+  running: '▶',
+  done: '✓',
+  failed: '✗',
+  ended: '–',
+}
+
 type Ending = { status: RunStatus; at: number }
+
+type Timed = { status: RunStatus; startedAt: number; endedAt?: number }
 
 type Token = { text: string; isOperator: boolean }
 
@@ -206,13 +245,42 @@ function shortModel(model: string): string {
   return model.replace(/^claude-/, '').replace(/\[.*\]$/, '')
 }
 
-function elapsed(run: Run): string {
-  if (run.endedAt === undefined) return ''
-  const seconds = Math.max(0, Math.round((run.endedAt - run.startedAt) / 1000))
+function duration(from: number, to: number): string {
+  const seconds = Math.max(0, Math.round((to - from) / 1000))
 
-  return seconds < 60
-    ? ` · ${seconds}초`
-    : ` · ${Math.floor(seconds / 60)}분 ${seconds % 60}초`
+  return seconds < 60 ? `${seconds}초` : `${Math.floor(seconds / 60)}분 ${seconds % 60}초`
+}
+
+function elapsed(run: Timed): string {
+  return run.endedAt === undefined ? '' : ` · ${duration(run.startedAt, run.endedAt)}`
+}
+
+function clockTime(ms: number): string {
+  const at = new Date(ms)
+
+  return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+}
+
+// 프롬프트의 첫 번째 내용 있는 줄을 작업 제목으로 쓴다.
+function promptTitle(text: string): string {
+  const first = text.split('\n').find(line => line.trim() !== '')?.trim() ?? ''
+
+  return first === '' ? '(내용 없음)' : clip(first, 40)
+}
+
+function jobSummary(job: Job): string {
+  const done = job.steps.filter(step => step.status === 'completed').length
+  const steps = job.steps.length === 0 ? '단계 없음' : `완료 ${done}/${job.steps.length}`
+  const time = job.endedAt === undefined ? '' : ` · ${duration(job.startedAt, job.endedAt)}`
+
+  return `${steps} · ${JOB_LABEL[job.status]}${time}`
+}
+
+function jobStatusOf(reason: string): JobStatus {
+  if (reason === 'answer') return 'done'
+  if (reason === 'aborted') return 'aborted'
+
+  return 'error'
 }
 
 function shortTool(name: string): string {
@@ -329,7 +397,7 @@ function finishPlan(list: PlanStep[]): PlanStep[] {
 }
 
 // 시작 전에 기록된 종료(같은 id로 다시 시작된 에이전트의 이전 실행)는 반영하지 않는다.
-function endRun(run: Run, ending: Ending | undefined): Run {
+function endRun<T extends Timed>(run: T, ending: Ending | undefined): T {
   return ending === undefined ||
     run.status !== 'running' ||
     ending.at < run.startedAt
@@ -414,7 +482,7 @@ async function addStats(
   )
 }
 
-async function toggleFiles($: EngineInterface, id: string): Promise<void> {
+async function toggleOpen($: EngineInterface, id: string): Promise<void> {
   await update($, expanded, list =>
     list.includes(id) ? list.filter(one => one !== id) : [...list, id],
   )
@@ -425,8 +493,9 @@ async function setCodex($: EngineInterface, health: CodexHealth): Promise<void> 
 }
 
 async function addRun($: EngineInterface, run: Run): Promise<void> {
+  const jobId = run.jobId ?? (await read($, currentJob)) ?? undefined
   await update($, runs, list =>
-    [...list.filter(one => one.id !== run.id), reconcile(run)].slice(-KEEP),
+    [...list.filter(one => one.id !== run.id), reconcile({ ...run, jobId })].slice(-KEEP),
   )
 }
 
@@ -434,11 +503,52 @@ async function refresh($: EngineInterface): Promise<void> {
   await update($, runs, list => list.map(reconcile))
 }
 
+// 프롬프트를 받으면 다음 메인 턴이 시작될 때 새 작업으로 연다. 로컬 명령처럼
+// 턴이 시작되지 않는 입력은 작업이 되지 않는다.
+let pendingPrompt: string | undefined
+
+async function startJob($: EngineInterface, prompt: string): Promise<void> {
+  const job: Job = {
+    id: crypto.randomUUID(),
+    prompt: promptTitle(prompt),
+    status: 'running',
+    startedAt: await $.clock.now(),
+    steps: [],
+    tasks: [],
+    toolErrors: 0,
+  }
+  await update($, jobs, list => [...list, job].slice(-JOB_KEEP))
+  await update($, currentJob, () => job.id)
+}
+
+async function changeJob($: EngineInterface, change: (job: Job) => Job): Promise<void> {
+  const id = await read($, currentJob)
+  if (id === null) return
+  await update($, jobs, list => list.map(job => (job.id === id ? change(job) : job)))
+}
+
+function reconcileTask(task: BgTask): BgTask {
+  return task.taskId === undefined ? task : endRun(task, taskEnds.get(task.taskId))
+}
+
+async function changeTasks($: EngineInterface, change: (task: BgTask) => BgTask): Promise<void> {
+  await update($, jobs, list =>
+    list.map(job => ({ ...job, tasks: job.tasks.map(change) })),
+  )
+}
+
+// 진행 중인 작업과 실행은 남기고 끝난 것만 지운다.
+async function clearHistory($: EngineInterface): Promise<void> {
+  await update($, jobs, list => list.filter(job => job.status === 'running'))
+  await update($, runs, list => list.filter(run => run.status === 'running'))
+}
+
 async function noteTask($: EngineInterface, text: string): Promise<void> {
   const notice = parseNotice(text)
   if (notice === undefined) return
   taskEnds.set(notice.taskId, { status: notice.status, at: await $.clock.now() })
   await refresh($)
+  await changeTasks($, reconcileTask)
 
   // 백그라운드 Codex의 출력은 알림이 가리키는 출력 파일에 있다.
   const list = await read($, runs)
@@ -542,6 +652,20 @@ export const register: Register = on => {
     return response
   })
 
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    // 사용자 프롬프트로 시작한 턴은 새 작업, 완료 알림으로 이어진 턴은 같은 작업이다.
+    const prompt = pendingPrompt
+    pendingPrompt = undefined
+    await quietly(() =>
+      prompt !== undefined
+        ? startJob($, prompt)
+        : changeJob($, job => ({ ...job, status: 'running', endedAt: undefined })),
+    )
+
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     const answered = await next(e)
     const loop = e.agentId ?? MAIN
@@ -549,15 +673,19 @@ export const register: Register = on => {
     if (e.agentId !== undefined) {
       agentEnds.set(e.agentId, { status: e.reason === 'answer' ? 'done' : 'failed', at })
     }
+    const ending: Ending = { status: 'ended', at }
     await quietly(() =>
       update($, runs, list =>
-        list.map(run =>
-          run.endsWith === loop
-            ? endRun(run, { status: 'ended', at })
-            : reconcile(run),
-        ),
+        list.map(run => (run.endsWith === loop ? endRun(run, ending) : reconcile(run))),
       ),
     )
+    await quietly(() =>
+      changeTasks($, task => (task.endsWith === loop ? endRun(task, ending) : task)),
+    )
+    if (e.agentId === undefined) {
+      const status = jobStatusOf(e.reason)
+      await quietly(() => changeJob($, job => ({ ...job, status, endedAt: at })))
+    }
 
     return answered
   })
@@ -576,91 +704,112 @@ export const register: Register = on => {
       )
     }
 
-    const path = EDIT_TOOLS.has(name) ? editedPath(args) : undefined
-    if (path !== undefined) {
-      const ran = await next(e)
-      if (agentId !== undefined && ran.deny === undefined && ran.isError !== true) {
-        await quietly(() =>
-          addStats($, agentId, counted => {
-            if (!counted.files.includes(path)) counted.files.push(path)
-          }),
-        )
-      }
-
-      return ran
-    }
-
-    if (name === PLAN_TOOL || name === WRAP_TOOL) {
-      const ran = await next(e)
-      if (ran.deny === undefined && ran.isError !== true) {
-        await quietly(() =>
-          update($, steps, list =>
-            name === WRAP_TOOL ? finishPlan(list) : applyPlan(list, args),
-          ),
-        )
-      }
-
-      return ran
-    }
-
-    if (e.tool !== 'Bash') return next(e)
-    const call = parseCodex(e.command)
-    if (call === undefined) return next(e)
-
     const id = e.tool_use_id
-    const loop = e.agentId ?? MAIN
-    await quietly(async () =>
-      addRun($, {
+    const loop = agentId ?? MAIN
+    const path = EDIT_TOOLS.has(name) ? editedPath(args) : undefined
+    const command = e.tool === 'Bash' ? e.command : undefined
+    const description = e.tool === 'Bash' ? e.description : undefined
+    const isBackground = e.tool === 'Bash' && e.run_in_background === true
+    const call = command === undefined ? undefined : parseCodex(command)
+    // Codex는 실행 항목으로, 그 밖의 백그라운드 Bash는 작업 이력의 백그라운드 작업으로 남긴다.
+    const isTask = command !== undefined && call === undefined && isBackground
+    // 시계는 기록할 실행이 있을 때만 읽는다(모든 도구 호출마다 읽지 않는다).
+    const startedAt = call !== undefined || isTask ? await $.clock.now() : 0
+
+    if (call !== undefined) {
+      await quietly(() =>
+        addRun($, {
+          id,
+          kind: 'codex',
+          type: `codex ${call.sub}`,
+          model: call.model ?? '기본 모델',
+          effort: call.effort ?? '기본값',
+          category: codexCategory(call),
+          description: description ?? 'Codex 실행',
+          isBackground,
+          status: 'running',
+          startedAt,
+        }),
+      )
+    }
+    if (isTask) {
+      const task: BgTask = {
         id,
-        kind: 'codex',
-        type: `codex ${call.sub}`,
-        model: call.model ?? '기본 모델',
-        effort: call.effort ?? '기본값',
-        category: codexCategory(call),
-        description: e.description ?? 'Codex 실행',
-        isBackground: e.run_in_background === true,
+        description: description ?? clip(command, 60),
         status: 'running',
-        startedAt: await $.clock.now(),
-      }),
-    )
+        startedAt,
+      }
+      await quietly(() => changeJob($, job => ({ ...job, tasks: [...job.tasks, task] })))
+    }
 
     const ran = await next(e)
-    const result = ran.result as
-      | {
-          stdout?: string
-          stderr?: string
-          backgroundTaskId?: string
-          backgroundEndsWithFinalResponse?: true
-        }
-      | undefined
-    const taskId = ran.isError === true ? undefined : result?.backgroundTaskId
     const failed = ran.deny !== undefined || ran.isError === true
-    // 포그라운드 실행은 결과에 출력이 있어 바로 판단한다. 거부된 호출은 Codex가 돌지 않았다.
-    if (taskId === undefined && ran.deny === undefined) {
-      const output = `${result?.stdout ?? ''}\n${result?.stderr ?? ''}\n${ran.text ?? ''}`
-      await quietly(() => setCodex($, codexHealth(output, failed)))
-    }
-    const at = await $.clock.now()
-    await quietly(() =>
-      update($, runs, list =>
-        list.map(run => {
-          if (run.id !== id) return run
-          if (taskId === undefined) {
-            return endRun(run, { status: failed ? 'failed' : 'done', at })
-          }
-          const endsWith = result?.backgroundEndsWithFinalResponse ? loop : undefined
 
-          return reconcile({ ...run, taskId, endsWith })
+    if (failed) {
+      await quietly(() => changeJob($, job => ({ ...job, toolErrors: job.toolErrors + 1 })))
+    }
+
+    if (path !== undefined && agentId !== undefined && !failed) {
+      await quietly(() =>
+        addStats($, agentId, counted => {
+          if (!counted.files.includes(path)) counted.files.push(path)
         }),
-      ),
-    )
+      )
+    }
+
+    if ((name === PLAN_TOOL || name === WRAP_TOOL) && !failed) {
+      let planned: PlanStep[] = []
+      await quietly(() =>
+        update($, steps, list =>
+          (planned = name === WRAP_TOOL ? finishPlan(list) : applyPlan(list, args)),
+        ),
+      )
+      const recap = name === WRAP_TOOL && typeof args.recap === 'string' ? args.recap : undefined
+      await quietly(() =>
+        changeJob($, job => ({
+          ...job,
+          steps: planned,
+          ...(recap === undefined ? {} : { recap: clip(recap, 300) }),
+        })),
+      )
+    }
+
+    if (call !== undefined || isTask) {
+      const result = ran.result as
+        | {
+            stdout?: string
+            stderr?: string
+            backgroundTaskId?: string
+            backgroundEndsWithFinalResponse?: true
+          }
+        | undefined
+      const taskId = ran.isError === true ? undefined : result?.backgroundTaskId
+      const endsWith = result?.backgroundEndsWithFinalResponse ? loop : undefined
+      const ending: Ending = { status: failed ? 'failed' : 'done', at: await $.clock.now() }
+      const settle = <T extends Timed & { id: string; taskId?: string }>(item: T): T =>
+        item.id !== id ? item : taskId === undefined ? endRun(item, ending) : { ...item, taskId, endsWith }
+
+      if (call !== undefined) {
+        // 포그라운드 실행은 결과에 출력이 있어 바로 판단한다. 거부된 호출은 Codex가 돌지 않았다.
+        if (taskId === undefined && ran.deny === undefined) {
+          const output = `${result?.stdout ?? ''}\n${result?.stderr ?? ''}\n${ran.text ?? ''}`
+          await quietly(() => setCodex($, codexHealth(output, failed)))
+        }
+        await quietly(() => update($, runs, list => list.map(run => reconcile(settle(run)))))
+      } else {
+        await quietly(() => changeTasks($, task => reconcileTask(settle(task))))
+      }
+    }
 
     return ran
   })
 
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin.kind === 'task-notification') {
+    // 엔진은 늘 origin을 채우지만, 비어 있어도 프롬프트 처리는 막지 않는다.
+    if (e.origin?.kind === 'task-notification') {
       await quietly(() => noteTask($, e.text))
+    } else if (e.isMeta !== true) {
+      pendingPrompt = e.text
     }
 
     return next(e)
@@ -706,12 +855,58 @@ export const register: Register = on => {
     )
   })
 
+  // 위쪽은 지금 실행 중인 것, 아래쪽은 프롬프트 단위의 작업 이력(최근 순 아코디언)이다.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
-    const list = [...(await read($, runs))].reverse()
-    const hasEnded = list.some(run => run.status !== 'running')
+    const allRuns = await read($, runs)
+    const running = [...allRuns].reverse().filter(run => run.status === 'running')
+    const history = [...(await read($, jobs))].reverse()
     const health = codexText(await read($, codex))
     const opened = await read($, expanded)
+    // 작업 기록 없이 끝난 실행(모드가 다시 로드되기 전 실행 등)은 이력 아래에 따로 모은다.
+    const jobIds = new Set(history.map(job => job.id))
+    const orphans = [...allRuns]
+      .reverse()
+      .filter(run => run.status !== 'running' && (run.jobId === undefined || !jobIds.has(run.jobId)))
+    const hasEnded = history.some(job => job.status !== 'running') || orphans.length > 0
+
+    // 끝난 실행 한 건을 이력 안에 두 줄로 보인다.
+    const finished = (run: Run) => (
+      <Box flexDirection="column">
+        <Text color={RUN_COLOR[run.status]} wrap="wrap">
+          {RUN_MARK[run.status]} {run.type} [{run.category}] · {shortModel(run.model)} · 추론{' '}
+          {run.effort}
+          {elapsed(run)}
+        </Text>
+        <Text dimColor wrap="wrap">
+          {'  '}
+          {run.description}
+          {run.stats === undefined ? '' : ` · ${usageText(run.stats)}`}
+        </Text>
+        {files(run)}
+      </Box>
+    )
+
+    // 수정 파일 목록 아코디언. 실행 중과 이력 어느 쪽에서나 같은 모양으로 쓴다.
+    const files = (run: Run) =>
+      run.stats !== undefined &&
+      run.stats.files.length > 0 && (
+        <Box flexDirection="column">
+          <Button
+            key={`files:${run.id}`}
+            plain
+            label={`${opened.includes(run.id) ? '▾' : '▸'} 수정 파일 ${run.stats.files.length}개`}
+            onPress={() => toggleOpen($, run.id)}
+          />
+          {opened.includes(run.id) &&
+            run.stats.files.map(file => (
+              <Text dimColor wrap="truncate-start">
+                {'  '}
+                {shortPath(file)}
+              </Text>
+            ))}
+        </Box>
+      )
 
     return (
       <Box flexDirection="column">
@@ -723,10 +918,12 @@ export const register: Register = on => {
         </Box>
 
         <Box marginTop={1}>
-          <Text bold>서브에이전트 · Codex 실행</Text>
+          <Text bold>실행 중 ({running.length})</Text>
         </Box>
-        {list.length === 0 && <Text dimColor>아직 실행된 항목이 없습니다.</Text>}
-        {list.map(run => (
+        {running.length === 0 && (
+          <Text dimColor>실행 중인 서브에이전트·Codex가 없습니다.</Text>
+        )}
+        {running.map(run => (
           <Box flexDirection="column" marginTop={1}>
             <Box>
               <Text bold color={RUN_COLOR[run.status]}>
@@ -738,7 +935,6 @@ export const register: Register = on => {
             <Text>
               {shortModel(run.model)} · 추론 {run.effort}
               {run.isBackground ? ' · 백그라운드' : ''}
-              {elapsed(run)}
             </Text>
             <Text dimColor wrap="wrap">
               {run.description}
@@ -748,33 +944,87 @@ export const register: Register = on => {
                 {usageText(run.stats)}
               </Text>
             )}
-            {run.stats !== undefined && run.stats.files.length > 0 && (
-              <Box flexDirection="column">
-                <Button
-                  key={`files:${run.id}`}
-                  label={`${opened.includes(run.id) ? '▾' : '▸'} 수정 파일 ${run.stats.files.length}개`}
-                  onPress={() => toggleFiles($, run.id)}
-                />
-                {opened.includes(run.id) &&
-                  run.stats.files.map(file => (
-                    <Text dimColor wrap="truncate-start">
-                      {'  '}
-                      {shortPath(file)}
-                    </Text>
-                  ))}
-              </Box>
-            )}
+            {files(run)}
           </Box>
         ))}
+
+        <Box marginTop={1}>
+          <Text bold>작업 이력</Text>
+        </Box>
+        {history.length === 0 && orphans.length === 0 && (
+          <Text dimColor>아직 기록된 작업이 없습니다.</Text>
+        )}
+        {history.map(job => {
+          const key = `job:${job.id}`
+          const isOpen = opened.includes(key)
+          const jobRuns = allRuns.filter(
+            run => run.jobId === job.id && run.status !== 'running',
+          )
+
+          return (
+            <Box flexDirection="column" marginTop={1}>
+              <Box overflow="hidden">
+                <Button
+                  key={key}
+                  plain
+                  label={`${isOpen ? '▾' : '▸'} ${clockTime(job.startedAt)}  ${job.prompt}`}
+                  onPress={() => toggleOpen($, key)}
+                />
+              </Box>
+              <Text color={JOB_COLOR[job.status]}>
+                {'  '}
+                {jobSummary(job)}
+                {job.toolErrors > 0 ? ` · 도구 오류·거부 ${job.toolErrors}회` : ''}
+              </Text>
+              {isOpen && (
+                <Box flexDirection="column" paddingLeft={2}>
+                  {job.steps.length === 0 && <Text dimColor>작업 단계 없음</Text>}
+                  {job.steps.map(step => (
+                    <Text
+                      color={step.status === 'completed' ? 'success' : undefined}
+                      dimColor={step.status === 'pending'}
+                      wrap="wrap"
+                    >
+                      {STEP_MARK[step.status]} {step.content}
+                      {job.status !== 'running' && step.status !== 'completed' ? ' (미완료)' : ''}
+                    </Text>
+                  ))}
+                  {job.tasks.length > 0 && (
+                    <Box flexDirection="column" marginTop={1}>
+                      <Text bold>백그라운드 작업</Text>
+                      {job.tasks.map(task => (
+                        <Text color={RUN_COLOR[task.status]} wrap="wrap">
+                          {RUN_MARK[task.status]} {task.description} · {RUN_LABEL[task.status]}
+                          {elapsed(task)}
+                        </Text>
+                      ))}
+                    </Box>
+                  )}
+                  {jobRuns.length > 0 && (
+                    <Box flexDirection="column" marginTop={1}>
+                      <Text bold>서브에이전트 · Codex</Text>
+                      {jobRuns.map(finished)}
+                    </Box>
+                  )}
+                  {job.recap !== undefined && (
+                    <Box marginTop={1}>
+                      <Text wrap="wrap">결과: {job.recap}</Text>
+                    </Box>
+                  )}
+                </Box>
+              )}
+            </Box>
+          )
+        })}
+        {orphans.length > 0 && (
+          <Box flexDirection="column" marginTop={1}>
+            <Text bold>작업에 묶이지 않은 실행</Text>
+            {orphans.map(finished)}
+          </Box>
+        )}
         {hasEnded && (
-          <Box marginTop={1}>
-            <Button
-              key="clear"
-              label="끝난 항목 지우기"
-              onPress={() =>
-                update($, runs, all => all.filter(run => run.status === 'running'))
-              }
-            />
+          <Box marginTop={1} justifyContent="flex-end">
+            <Button key="clear" label="이력 지우기" onPress={() => clearHistory($)} />
           </Box>
         )}
       </Box>

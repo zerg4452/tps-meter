@@ -17,25 +17,38 @@ Shows live generation speed and total elapsed time in the status line under the 
 
 ## subagent-panel
 
-Opens a pane (`에이전트 현황`) beside the transcript.
+Opens a pane (`에이전트 현황`) beside the transcript. The top shows what is running now; the bottom keeps a history of recent work, one entry per prompt, newest first.
 
 ```
 Codex 사용 한도 초과 · 9:00 PM 이후 가능 → Claude 자체 검토로 대체
 
-서브에이전트 · Codex 실행
-
+실행 중 (1)
 [진행] worker [구현]
 sonnet-5-5 · 추론 medium
 로그인 기능 구현
 토큰 입력 45.2k · 출력 3.1k · 도구 18회 (Read 9 · Edit 5 · Bash 4)
-▾ 수정 파일 2개
-  …/src/login/LoginController.java
-  …/main/web/login.jsp
+▸ 수정 파일 2개
 
-[완료] codex task [보안검토]
-gpt-6-astra · 추론 high · 백그라운드 · 3분 12초
-Codex 보안 검토
+작업 이력
+▾ 18:24  일단 푸시까지 해줘
+  완료 4/4 · 정상 종료 · 2분 13초
+    ✓ 저장소에 복사
+    ✓ marketplace.json·README 갱신
+    ✓ 검증·테스트
+    ✓ 커밋·push
+    백그라운드 작업
+    ✓ dev 서버 실행 · 완료 · 41초
+    서브에이전트 · Codex
+    ✓ codex task [보안검토] · gpt-6-astra · 추론 high · 3분 12초
+      Codex 보안 검토
+    결과: main으로 push했습니다.
+▸ 18:12  텍스트 박스 영역이 너무 좁아졌어
+  완료 1/2 · 중단됨 · 41초 · 도구 오류·거부 1회
+                                           [ 이력 지우기 ]
 ```
+
+- **실행 중**: subagents and Codex runs that have not finished.
+- **작업 이력**: each prompt you send starts an entry; turns that a background task's completion notice starts are added to the same entry. Folded, it shows the time, the prompt's first line, steps done, how the turn ended (정상 종료, 중단됨, 오류) and how long it took, plus failed or denied tool calls. Unfolded, it lists the steps from the desktop app's task list (✓ done, ▶ in progress, · not started; steps left when the entry ended are marked 미완료), the background Bash commands it started, the subagents and Codex runs it started, and the closing recap. The last 20 entries are kept for the session. The task list has no failed state, so a step shows only whether it was completed; the entry's ending and tool errors tell whether things went wrong.
 
 - **Codex availability**: read from the last Codex run's output. A `Codex error:` line about a usage limit, rate limit or quota shows as 사용 한도 초과, with the time it can run again when the error names one.
 - **Subagents**: type, the model and effort of their first model request, and a category taken from the agent type, or from words in the task description (보안, 리뷰, 화면/UI, 테스트, 조사). Tokens are summed over the subagent's model requests (input includes cache reads and writes). Tool calls are counted per tool, top three shown. Files it changed with `Edit`, `Write` or `NotebookEdit` are listed under a toggle (▸ / ▾).

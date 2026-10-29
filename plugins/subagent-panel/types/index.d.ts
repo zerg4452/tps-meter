@@ -26,6 +26,34 @@ export type Run = {
   // 완료 알림 없이 이 루프의 응답과 함께 끝나는 실행이면 그 루프 id (메인은 'main')
   endsWith?: string
   stats?: RunStats
+  // 이 실행을 시작한 작업(프롬프트) id
+  jobId?: string
+}
+
+// 작업 중 백그라운드로 실행한 Bash 명령(Codex 제외. Codex는 Run으로 기록한다)
+export type BgTask = {
+  id: string
+  description: string
+  status: RunStatus
+  startedAt: number
+  endedAt?: number
+  taskId?: string
+  endsWith?: string
+}
+
+export type JobStatus = 'running' | 'done' | 'aborted' | 'error'
+
+// 사용자 프롬프트 하나로 시작한 작업. 완료 알림으로 이어진 턴도 같은 작업에 붙는다.
+export type Job = {
+  id: string
+  prompt: string
+  status: JobStatus
+  startedAt: number
+  endedAt?: number
+  steps: PlanStep[]
+  tasks: BgTask[]
+  toolErrors: number
+  recap?: string
 }
 
 export type StepStatus = 'pending' | 'in_progress' | 'completed'
@@ -46,6 +74,8 @@ declare module 'claude-code' {
       isPaneOpen: boolean
       codex: Shaped<CodexHealth | null>
       expanded: Shaped<string[]>
+      jobs: Shaped<Job[]>
+      currentJob: string | null
     }
   }
 }
