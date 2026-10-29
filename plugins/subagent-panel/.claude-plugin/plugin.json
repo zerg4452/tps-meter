@@ -1,0 +1,7 @@
+{
+  "name": "subagent-panel",
+  "version": "0.1.0",
+  "description": "Shows subagent and Codex runs (model, effort, usage, edited files) and Codex availability in a side pane, with an open/close button above the prompt.",
+  "author": { "name": "kims" },
+  "types": "./types/index.d.ts"
+}

@@ -1,5 +1,8 @@
 {
   "name": "kims-mods",
   "owner": { "name": "kims" },
-  "plugins": [{ "name": "tps-meter", "source": "./" }]
+  "plugins": [
+    { "name": "tps-meter", "source": "./" },
+    { "name": "subagent-panel", "source": "./plugins/subagent-panel" }
+  ]
 }
