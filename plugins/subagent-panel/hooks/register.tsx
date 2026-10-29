@@ -303,13 +303,6 @@ function usageText(stats: RunStats): string {
   return `토큰 입력 ${formatTokens(stats.inputTokens)} · 출력 ${formatTokens(stats.outputTokens)} · ${tools}`
 }
 
-// 긴 경로는 끝의 세 단계만 보인다.
-function shortPath(path: string): string {
-  const parts = path.split(/[\\/]/).filter(part => part !== '')
-
-  return parts.length > 3 ? `…/${parts.slice(-3).join('/')}` : parts.join('/')
-}
-
 function editedPath(args: Record<string, unknown>): string | undefined {
   const path = args.file_path ?? args.notebook_path
 
@@ -342,6 +335,15 @@ function codexText(health: CodexHealth | null): { text: string; color: string } 
   const until = health.until === undefined ? '' : ` · ${health.until} 이후 가능`
 
   return { text: `사용 한도 초과${until} → Claude 자체 검토로 대체`, color: 'error' }
+}
+
+// 이력에 원문으로 남기는 글(요청·결과·명령)의 상한. 화면에서는 자르지 않고 다 보인다.
+const MAX_TEXT = 4000
+
+function keep(text: string): string {
+  const trimmed = text.trim()
+
+  return trimmed.length > MAX_TEXT ? trimmed.slice(0, MAX_TEXT) : trimmed
 }
 
 function clip(text: string, length: number): string {
@@ -510,7 +512,7 @@ let pendingPrompt: string | undefined
 async function startJob($: EngineInterface, prompt: string): Promise<void> {
   const job: Job = {
     id: crypto.randomUUID(),
-    prompt: promptTitle(prompt),
+    prompt: keep(prompt),
     status: 'running',
     startedAt: await $.clock.now(),
     steps: [],
@@ -735,7 +737,7 @@ export const register: Register = on => {
     if (isTask) {
       const task: BgTask = {
         id,
-        description: description ?? clip(command, 60),
+        description: keep(description ?? command),
         status: 'running',
         startedAt,
       }
@@ -769,7 +771,7 @@ export const register: Register = on => {
         changeJob($, job => ({
           ...job,
           steps: planned,
-          ...(recap === undefined ? {} : { recap: clip(recap, 300) }),
+          ...(recap === undefined ? {} : { recap: keep(recap) }),
         })),
       )
     }
@@ -898,11 +900,12 @@ export const register: Register = on => {
             label={`${opened.includes(run.id) ? '▾' : '▸'} 수정 파일 ${run.stats.files.length}개`}
             onPress={() => toggleOpen($, run.id)}
           />
+          {/* 펼쳤을 때는 경로를 줄이지 않고 전체를 줄바꿈해 보인다. */}
           {opened.includes(run.id) &&
             run.stats.files.map(file => (
-              <Text dimColor wrap="truncate-start">
+              <Text dimColor wrap="wrap">
                 {'  '}
-                {shortPath(file)}
+                {file}
               </Text>
             ))}
         </Box>
@@ -967,7 +970,7 @@ export const register: Register = on => {
                 <Button
                   key={key}
                   plain
-                  label={`${isOpen ? '▾' : '▸'} ${clockTime(job.startedAt)}  ${job.prompt}`}
+                  label={`${isOpen ? '▾' : '▸'} ${clockTime(job.startedAt)}  ${promptTitle(job.prompt)}`}
                   onPress={() => toggleOpen($, key)}
                 />
               </Box>
@@ -978,6 +981,12 @@ export const register: Register = on => {
               </Text>
               {isOpen && (
                 <Box flexDirection="column" paddingLeft={2}>
+                  {/* 펼치면 제목 줄에서 줄인 요청 원문을 그대로 보인다. */}
+                  <Box marginBottom={1}>
+                    <Text dimColor wrap="wrap">
+                      요청: {job.prompt}
+                    </Text>
+                  </Box>
                   {job.steps.length === 0 && <Text dimColor>작업 단계 없음</Text>}
                   {job.steps.map(step => (
                     <Text

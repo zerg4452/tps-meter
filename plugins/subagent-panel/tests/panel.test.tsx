@@ -374,7 +374,7 @@ test('서브에이전트별 도구 사용량과 수정 파일을 아코디언으
       '▾ 수정 파일 1개',
     )
     expect((await ui.find({ type: 'Text', text: /login\.jsp/ }))?.text).toBe(
-      '  …/main/web/login.jsp',
+      '  /repo/src/main/web/login.jsp',
     )
 
     await ui.press({ key: 'files:w1' })
@@ -439,6 +439,10 @@ const complete = (reason: 'answer' | 'aborted', turnId: string) => ({
   reason,
 })
 
+// 300자가 넘는 결과 요약: 펼쳤을 때 줄이지 않고 다 보여야 한다.
+const LONG_RECAP = `main으로 push했습니다. ${'검증과 테스트를 모두 통과했습니다. '.repeat(20)}끝.`
+const LONG_PROMPT = `일단 푸시까지 해줘 그리고 ${'아주 긴 요청 문장입니다 '.repeat(5)}\n둘째 줄`
+
 test('프롬프트 하나가 작업 이력 하나가 되고 펼치면 단계·백그라운드 작업·결과가 보인다', async ($, on) => {
   const clock = mock.clock(on)
   prompted(on)
@@ -448,7 +452,7 @@ test('프롬프트 하나가 작업 이력 하나가 되고 펼치면 단계·�
       : { result: {} },
   )
 
-  await $.prompt.submit({ text: '일단 푸시까지 해줘\n둘째 줄' })
+  await $.prompt.submit({ text: LONG_PROMPT })
   await $.turn.start({ text: '일단 푸시까지 해줘', turnId: 't1' })
   await $.tool.call({
     tool: 'mcp__ccd_turn__update_plan',
@@ -464,7 +468,7 @@ test('프롬프트 하나가 작업 이력 하나가 되고 펼치면 단계·�
     run_in_background: true,
   })
   await $.tool.call({ tool: 'mcp__ccd_turn__update_plan', advance: true })
-  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'main으로 push했습니다.' })
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: LONG_RECAP })
   await clock.advance(75_000)
   await $.turn.complete(complete('answer', 't1'))
 
@@ -481,20 +485,23 @@ test('프롬프트 하나가 작업 이력 하나가 되고 펼치면 단계·�
     const header = await ui.findAll({ type: 'Button', text: /일단 푸시까지/ })
 
     expect(header).toHaveLength(1)
-    expect(header[0]?.props.label).toMatch(/^▸ \d{2}:\d{2} {2}일단 푸시까지 해줘$/)
+    // 접힌 제목 줄은 첫 줄을 줄여서 보인다.
+    expect(header[0]?.props.label).toMatch(/^▸ \d{2}:\d{2} {2}일단 푸시까지 해줘 그리고 .*…$/)
     expect((await ui.find({ type: 'Text', text: /정상 종료/ }))?.text).toBe(
       '  완료 2/2 · 정상 종료 · 1분 15초',
     )
     expect(await ui.find({ type: 'Text', text: /저장소에 복사/ })).toBeUndefined()
 
     await ui.press({ key: header[0]?.key ?? '' })
+    // 펼치면 요청 원문과 결과 요약을 줄이지 않고 다 보인다.
+    expect((await ui.find({ type: 'Text', text: /^요청/ }))?.text).toBe(`요청: ${LONG_PROMPT.trim()}`)
     expect((await ui.find({ type: 'Text', text: /저장소에 복사/ }))?.text).toBe('✓ 저장소에 복사')
     expect((await ui.find({ type: 'Text', text: /커밋·push/ }))?.text).toBe('✓ 커밋·push')
     expect((await ui.find({ type: 'Text', text: /dev 서버/ }))?.text).toMatch(
       /^✓ dev 서버 실행 · 완료/,
     )
     expect((await ui.find({ type: 'Text', text: /^결과/ }))?.text).toBe(
-      '결과: main으로 push했습니다.',
+      `결과: ${LONG_RECAP}`,
     )
     await ui.press({ key: header[0]?.key ?? '' })
     await ui.unmount()
