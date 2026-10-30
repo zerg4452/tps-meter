@@ -521,6 +521,8 @@ async function startJob($: EngineInterface, prompt: string): Promise<void> {
   }
   await update($, jobs, list => [...list, job].slice(-JOB_KEEP))
   await update($, currentJob, () => job.id)
+  // 단계는 작업마다 새로 쌓는다. 남겨 두면 단계 없이 끝난 작업에 앞 작업 단계가 복사된다.
+  await update($, steps, () => [])
 }
 
 async function changeJob($: EngineInterface, change: (job: Job) => Job): Promise<void> {

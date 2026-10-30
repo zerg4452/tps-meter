@@ -551,3 +551,43 @@ test('중단된 작업은 중단됨과 남은 단계의 미완료, 실패한 도
   expect(await ui.find({ type: 'Text', text: /아직 기록된 작업이 없습니다/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('단계 없이 끝난 작업에 앞 작업의 단계가 섞이지 않는다', async ($, on) => {
+  mock.clock(on)
+  prompted(on)
+  on('tool.call', () => ({ result: {} }))
+  on('ui.panes', () => ({ value: [] }))
+
+  await $.prompt.submit({ text: '권고안대로 구현' })
+  await $.turn.start({ text: '권고안대로 구현', turnId: 't1' })
+  await $.tool.call({
+    tool: 'mcp__ccd_turn__update_plan',
+    items: [
+      { content: '조사', status: 'completed' },
+      { content: '구현', status: 'in_progress' },
+    ],
+  })
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: '구현 끝' })
+  await $.turn.complete(complete('answer', 't1'))
+
+  await $.prompt.submit({ text: '테스트 해줄수있어' })
+  await $.turn.start({ text: '테스트 해줄수있어', turnId: 't2' })
+  await $.tool.call({ tool: 'mcp__ccd_turn__update_plan', advance: true })
+  await $.tool.call({ tool: 'mcp__ccd_turn__wrap_up', recap: '테스트 끝' })
+  await $.turn.complete(complete('answer', 't2'))
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.findAll({ type: 'Text', text: /정상 종료/ })).map(line => line.text)).toEqual([
+    '  단계 없음 · 정상 종료 · 0초',
+    '  완료 2/2 · 정상 종료 · 0초',
+  ])
+  await ui.unmount()
+
+  // 새 프롬프트를 받으면 입력창 위 요약에서도 앞 작업 단계가 사라진다.
+  await $.prompt.submit({ text: '다음 작업' })
+  await $.turn.start({ text: '다음 작업', turnId: 't3' })
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const summary = await band.find({ type: 'Text', text: /에이전트 진행/ })
+  expect(summary?.text ?? '').not.toContain('완료 ')
+  await band.unmount()
+})
